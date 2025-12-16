@@ -1,0 +1,7 @@
+baseURL = "https://example.org/"
+languageCode = "en-us"
+title = "Legibility and Technology"
+theme = "PaperMod"
+
+[markup.goldmark.renderer]
+unsafe = true
