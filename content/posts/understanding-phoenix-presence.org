@@ -43,14 +43,41 @@ The official Phoenix Presence documentation suggests wrapping the Phoenix Presen
 ** Data Types
 I've annotated the following types and how they fit in to the Phoenix Presence with additional information compared to what's in the documentation.
 
-+ ~presences~ and ~presence_diffs~ :: A map of data for all the presence-tracked information under a given topic, keyed by presence ids (users). The typespec for ~presences~ is <src_elixir[exports: code]{@type presences :: %{required(String.t()) => %{metas: [meta()]}}}. The typespec for ~presence_diffs~ is <src_elixir[exports: code]{@type presence_diffs :: %{required(String.t()) => %{metas: [meta() | meta_diff()]}}}.
-+ ~meta~ and ~meta_diff~ :: These are both maps containing the data related to an individual connection. The ~:phx_ref~ uniquely identifies the connection process within Phoenix Presence. The ~meta_diff~ type is used to indicate that connection-specific data has changed. It contains the ~:phx_ref~ of the connection data it is replacing under the metadata for a connection that used the ~:phx_ref_prev~ identifier. The new data will be identified with the ~:phx_ref~ key. The typespec for ~meta~ is: <src_elixir[exports: code]{@type() meta() :: %{phx_ref: String.t()}}, while the typespec for ~meta_diff~ is <src_elixir[exports: code]{@type() :: %{phx_ref: String.t(), phx_ref_prev: String.t()}}.
+*** ~presences~ and ~presence_diffs~
+A map of data for all the presence-tracked information under a given topic, keyed by presence ids (users). The typespec for ~presences~ is
+
+  #+begin_src elixir
+   @type presences :: %{required(String.t()) => %{metas: [meta()]}}
+  #+end_src
+
+  The typespec for ~presence_diffs~ is
+  
+  #+begin_src elixir
+   @type presence_diffs ::
+           %{required(String.t()) => %{metas: [meta() | meta_diff()]}}
+  #+end_src
+
+*** ~meta~ and ~meta_diff~
+These are both maps containing the data related to an individual connection. The ~:phx_ref~ uniquely identifies the connection process within Phoenix Presence. The ~meta_diff~ type is used to indicate that connection-specific data has changed. It contains the ~:phx_ref~ of the connection data it is replacing under the metadata for a connection that used the ~:phx_ref_prev~ identifier. The new data will be identified with the ~:phx_ref~ key. The typespec for ~meta~ is
+
+#+begin_src elixir
+ @type() meta() :: %{phx_ref: String.t()}
+#+end_src
+
+ while the typespec for ~meta_diff~ is
+
+ #+begin_src elixir
+   @type() :: %{phx_ref: String.t(), phx_ref_prev: String.t()}
+ #+end_src
 
 ** Callbacks to Implement
 While all of the Phoenix Presence functions we use are technically callbacks, the following are ones we typically implement in the presence module to customize business logic.
 
 *** ~init/1~
-Overriding this function allows us to override powerful ~handle_metas/4~ callback. It looks and acts like the GenServer ~init/1~ callback, allowing us to provide state, which the documenation refers to as "user-land state". I haven't yet found a use for this state, and typically just use the following implementation <src_elixir[exports: code]{def init(_opts), do: {:ok, %{}}}
+Overriding this function allows us to override powerful ~handle_metas/4~ callback. It looks and acts like the GenServer ~init/1~ callback, allowing us to provide state, which the documenation refers to as "user-land state". I haven't yet found a use for this state, and typically just use the following implementation:
+#+begin_src elixir
+ def init(_opts), do: {:ok, %{}}
+#+end_src
 
 *** ~handle_metas/4~
 This callback is invoked every time the state of the presence is changed for any reason. This happens for one of three reasons:
@@ -75,9 +102,15 @@ This callback is invoked every time the state of the presence is changed for any
   When a process joins or leaves a presence, this callback will be invoked with its corresponding "meta" map populating the ~:joins~ or ~:leaves~ keys of the ~diff~ map, respectivel. However, when a process updates its "meta" map due to invocation of ~update~, this will cause entries for that process to appear in both the ~:joins~ and ~:leaves~ keys of the ~diff~ map, with the ~:joins~ map containing the new metadata that process as a ~meta_diff~ type so it can identify the "meta" map to replace, and the ~:leaves~ field containing the previous "meta" map. The entry keyed for that process in the ~presences~ map will forever now be a ~meta_diff()~ map, with a ~:phx_ref_prev~ key pointing to the previous version of the map.
   
 *** ~fetch/2~
-While the presence map for a given presence id is required to contain a ~:metas~ key whose value contains the list of meta map data for client connections grouped under that presence id, the presence map may also contain other fields. These can be populated by overriding the ~fetch/2~ callback. The typespec of this callback is <src_elixir[exports: code]{@callback fetch(topic(), presences()) :: presences()}. The idea with this callback is to allow the presence data for that presence id to hold data that we may wish to keep track of and use in a "presence context", but do not wish to store in the ~:metas~ field, which is expensive. Instead, the intention of this callback is to fetch data from a database or some similar such resource. In my experience, the ~fetch/2~ callback is called frequently, usually a few times before ~handle_metas/4~ ends up being called, though the second parameter, ~presences()~, changes frequently and is often empty.
+While the presence map for a given presence id is required to contain a ~:metas~ key whose value contains the list of meta map data for client connections grouped under that presence id, the presence map may also contain other fields. These can be populated by overriding the ~fetch/2~ callback. The typespec of this callback is:
 
-* Commentary (and Conjecture)
+#+begin_src elixir
+ @callback fetch(topic(), presences()) :: presences()
+#+end_src
+
+The idea with this callback is to allow the presence data for that presence id to hold data that we may wish to keep track of and use in a "presence context", but do not wish to store in the ~:metas~ field, which is expensive. Instead, the intention of this callback is to fetch data from a database or some similar such resource. In my experience, the ~fetch/2~ callback is called frequently, usually a few times before ~handle_metas/4~ ends up being called, though the second parameter, ~presences()~, changes frequently and is often empty.
+
+* Commentary
 ** The ~:metas~ are CRDTs
 Phoenix Presence's use of the ~meta~ and ~meta_diff~ types is a bit odd. It might seem easier to store the "metas" for a given presence in a map, keyed by the id stored in ~phx_ref~, but instead Phoenix Presence presents us with a list of maps, with diffs referring back to previous versions of the Presence meta. While I don't know very much about CRDTs, this shape of data feels like one, where we need to keep track of previous versions of a value in order to have enough data for things to eventually line up.
 
