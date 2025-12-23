@@ -1,0 +1,96 @@
+#+TITLE: Exploring Phoenix Presence Empirically
+#+AUTHOR: Franklin Palmer
+#+DATE: 2025-12-22
+
+There often comes a time as one progresses toward building "soft real-time" web applications using Elixir's Phoenix framework, when the idea of connecting multiple clients together seems natural, almost inevitable. And with features like Liveview and PubSub, most of the building blocks to pull this off are readily available. However, as anyone who has whittled away many a crisp school night on AIM (AOL Instant Messenger) knows, inter-connecting clients means not only routing messages. It is also important to provide each client with a reasonable guess as to who else is online so they can know whether it's worth messaging their friends in the first place.
+
+Once we give the idea of tracking "online-ness" a little more thought however, it turns out to be a subtler problem than one might have initially imagined:
+
+- What does it mean for a client to be "connected" in the first place? Receiving a message from them with a recent timestamp is a pretty good indication, but it is also likely that they are indeed "connected", attentively tending to their client, but simply haven't chosen to send any messages recently. Some kind of background "heartbeat" pinging seems like the best way to independently track each client's connectivity.
+- We also need to group individual client connections according to the actual "user"/person they correspond to. Especially on the modern web, users could be connected to our app using their laptop, workstation, phone, or even just multiple tabs on the same browser. Keeping track of each of the individual client connections a given user may have open is necessary for tracking their overall "online-ness".
+- Finally, on the modern web it is prudent to assume that our application will be spread across multiple servers sitting behind a load-balancer. This means we'll need to make sure all the information about all of our users' individual client connections is distributed across all of the servers that constitute our application. We should obviously also assume that individual client connections for the same user will be spread across multiple servers.
+
+There are two approaches to solving this problem. One option is to keep track of every client connection (grouped by "users") centrally, using a database or provisioning a special always-on server for tracking and relaying connectivity information. This approach is conceptually simpler (and thus easier to design and debug), but it has a few drawbacks. It introduces a single-point-of-failure to our otherwise robust system. It also burdens with another "infrastructural dependency" (a dependency that occupies its own computing resources, distinct from the rest of our application, like a database) that we may not have otherwise needed. We will need to care for and tend to this strange new infrastructure the same as we do our regular application, thus increasing the overall complexity of our application. 
+
+The other option is to treat "connectedness" as shared, distributed state amongst our application servers. This is much more complex, but Phoenix, building upon the BEAM and OTP already has a lot of the building blocks to pull it off. Indeed, they have pulled it off in the form of Phoenix Presence.
+
+Phoenix Presence solves all three of the problems mentioned above by building upon Erlang distribution and cutting-edge distributed computer science like CRDTs (Conflict-free Replicated Data Types). What's more, its capabilities can be easily added to your phoenix application by the simple invocation of the ~mix phx.gen.presence ...~ generator.
+
+However, I was unable to build an intuition for Phoenix Presence by studying its documentation or attempting to incorporate it into an already working app. I also found the source code (which depends heavily on the lower-level Phoenix Tracker API) to be rather impenetrable. Instead, I decided to build a demo application in which I could exercise as many of Phoenix Presence's features as possible in order to empirically gain an understanding for how it works.
+
+This demo app can be found _here_.
+
+* The Core Abstraction
+Phoenix applications, like all Erlang applications, are made from a constellation of processes, many of which correspond to client connections in a 1-1 manner (especially with LiveView). If we know that a given process corresponds to a user's client connection, we can reasonably assume that user to be "online", or "present" in our application. The job of Phoenix Presence is thus to track and organize information related to the existances of the Erlang processes across our cluster that we know correspond to individual client connections. It works at four levels of abstraction, which I'll go over from the top down.
+
++ The top-most level is the presence module that is generated with ~mix phx.gen.presence ...~. This is where all of the business-logic code related to this particular presence lives, with default implementations of it generated by including the ~use Phoenix.Presence, ...~ macro at the top. We can customize the presence's behavior by implementing some of Phoenix Presence's callbacks ourselves here. Another note is that this module marks the entry-point of the supervision-tree that will be handling and syncing all of the behavior of this presence in our application.
++ Below the presence module is the "topic" level. Topics act sort of like chatrooms, or channels in Slack parlance, creating islands of clients that are kept informed of each other's presence states, rather than keeping all the clients attached to a given presence informed about all the other clients' states. This level is often skipped in examples.
++ Below that is the "key" level, which really corresponds to "users". In almost all circumstances in which Phoenx Presence might be used, this corresponds to people. This level exists to handle the cases in which the same user has connected to the application via multiple clients (phone, laptop, several browser tabs, etc.) and we need to keep those connections grouped together in order to track whether the user as a whole is connected to the application, and also keep track of state that is relevant to the overall user, and not just particular to one of the clients they're using to connect.
++ Finally we reach the "meta" level, which corresponds 1-1 with the individual process connections clients are using to connect to the site. Each process connection tracked by Phoenix Presence corresponds to a single "meta" connection, which stores a unique identifier for that particular connection, as well as any other data we'd want to use it for.
+
+* Interactions
+Once a Phoenix Presence module has been created and started in its parent application, other processes can perform the following types of interactions with it:
+
++ Track their =pid= under a given topic, presence id, and associated "meta" data. The Presence module will then broadcast news of this on relevant PubSub topic as a "join" event. (They can also untrack their =pid=, which will then elicit a "leave" event, but most of the time this happens automatically when the process terminates.)
++ Query the presence for a list of data on all the connections currently being tracked by it, or more specifically for information about a the connections registered to a particular "presenc id".
++ Update the metas associated with their particular process.
+
+Those three classes of interactions represent the extent of the functional API offered by Phoenix Presence. In addition to the functional API, processes can also receive asynchronous updates messages from the Presence by subscribing to the right channels on Phoenix PubSub.
+
+* Client/Server Interface
+The official Phoenix Presence documentation suggests wrapping the Phoenix Presence functionality in a separate, simplified interface to be called by the clients that will be interacting with it. This seems like good advice to me, but doing it requires a more detailed understanding of the callbacks offered by Phoenix Presence as well as the datatypes they rely on.
+
+** Data Types
+I've annotated the following types and how they fit in to the Phoenix Presence with additional information compared to what's in the documentation.
+
++ ~presences~ and ~presence_diffs~ :: A map of data for all the presence-tracked information under a given topic, keyed by presence ids (users). The typespec for ~presences~ is <src_elixir[exports: code]{@type presences :: %{required(String.t()) => %{metas: [meta()]}}}. The typespec for ~presence_diffs~ is <src_elixir[exports: code]{@type presence_diffs :: %{required(String.t()) => %{metas: [meta() | meta_diff()]}}}.
++ ~meta~ and ~meta_diff~ :: These are both maps containing the data related to an individual connection. The ~:phx_ref~ uniquely identifies the connection process within Phoenix Presence. The ~meta_diff~ type is used to indicate that connection-specific data has changed. It contains the ~:phx_ref~ of the connection data it is replacing under the metadata for a connection that used the ~:phx_ref_prev~ identifier. The new data will be identified with the ~:phx_ref~ key. The typespec for ~meta~ is: <src_elixir[exports: code]{@type() meta() :: %{phx_ref: String.t()}}, while the typespec for ~meta_diff~ is <src_elixir[exports: code]{@type() :: %{phx_ref: String.t(), phx_ref_prev: String.t()}}.
+
+** Callbacks to Implement
+While all of the Phoenix Presence functions we use are technically callbacks, the following are ones we typically implement in the presence module to customize business logic.
+
+*** ~init/1~
+Overriding this function allows us to override powerful ~handle_metas/4~ callback. It looks and acts like the GenServer ~init/1~ callback, allowing us to provide state, which the documenation refers to as "user-land state". I haven't yet found a use for this state, and typically just use the following implementation <src_elixir[exports: code]{def init(_opts), do: {:ok, %{}}}
+
+*** ~handle_metas/4~
+This callback is invoked every time the state of the presence is changed for any reason. This happens for one of three reasons:
+
+  1. A process starts getting tracked by the Presence.
+  2. A process ceases to be tracked (due to process termination or invocation of ~untrack~).
+  3. The "metadata" for a connection is updated via invocation of ~update~ callbacks.
+     
+   Below is a more detailed typespec than what is officially given in the documentation. 
+      
+  #+begin_src elixir
+   @callback handle_metas(
+               topic :: String.t(),
+               diff :: %{joins: presence_diffs(), leaves: presences()},
+               presences :: %{required(String.t()) => [meta() | meta_diff()]},
+               state :: term()
+             ) :: {:ok, term()}
+  #+end_src
+
+  Of particular note: the ~presences~ parameter is not, in fact, a ~presences()~ type. It is a map of presence ids whose values contain *only* lists of ~meta()~ or ~meta_diff()~ maps for that presence id. Any other data associated with that presence id is not included in this parameter.
+
+  When a process joins or leaves a presence, this callback will be invoked with its corresponding "meta" map populating the ~:joins~ or ~:leaves~ keys of the ~diff~ map, respectivel. However, when a process updates its "meta" map due to invocation of ~update~, this will cause entries for that process to appear in both the ~:joins~ and ~:leaves~ keys of the ~diff~ map, with the ~:joins~ map containing the new metadata that process as a ~meta_diff~ type so it can identify the "meta" map to replace, and the ~:leaves~ field containing the previous "meta" map. The entry keyed for that process in the ~presences~ map will forever now be a ~meta_diff()~ map, with a ~:phx_ref_prev~ key pointing to the previous version of the map.
+  
+*** ~fetch/2~
+While the presence map for a given presence id is required to contain a ~:metas~ key whose value contains the list of meta map data for client connections grouped under that presence id, the presence map may also contain other fields. These can be populated by overriding the ~fetch/2~ callback. The typespec of this callback is <src_elixir[exports: code]{@callback fetch(topic(), presences()) :: presences()}. The idea with this callback is to allow the presence data for that presence id to hold data that we may wish to keep track of and use in a "presence context", but do not wish to store in the ~:metas~ field, which is expensive. Instead, the intention of this callback is to fetch data from a database or some similar such resource. In my experience, the ~fetch/2~ callback is called frequently, usually a few times before ~handle_metas/4~ ends up being called, though the second parameter, ~presences()~, changes frequently and is often empty.
+
+* Commentary (and Conjecture)
+** The ~:metas~ are CRDTs
+Phoenix Presence's use of the ~meta~ and ~meta_diff~ types is a bit odd. It might seem easier to store the "metas" for a given presence in a map, keyed by the id stored in ~phx_ref~, but instead Phoenix Presence presents us with a list of maps, with diffs referring back to previous versions of the Presence meta. While I don't know very much about CRDTs, this shape of data feels like one, where we need to keep track of previous versions of a value in order to have enough data for things to eventually line up.
+
+** Phoenix Presence does not start a new Presence Process per topic
+This was one of the questions that lead me to do this empirical, phenomenological study of Phoenix Presence. The existance of the ~init/1~ callback and the state it returns, as well as the state that's passed to ~handle_metas/4~, had me thinking of GenServers, and topics seemed to be a natural boundary at which to split them. A quick glance at Observer showed me that this was not the case though. Phoenix Presence spawns a supervisor and another process. I believe the number of processes involved has more to do with network boundaries in the server cluster. I am still unsure of any useful purpose for the state variable used by ~init/1~ and ~handle_metas/4~.
+
+** Origins of Phoenix Presence, the Client Library
+Phoenix Presence is a feature that predates Phoenix Liveview, currently the dominant paradigm for writing soft-realtime web applications, by a few years. As I understand it, prior to Phoenix Liveview, it was understood that writing realtime Phoenix applications required a lot more javascript and was more bespoke in what options were on offer. As a feature that was primarily designed to keep cilents informed of each other's states, Phoenix Presence came with a corresponding Javascript client library that could provide a seamless interface with which to interface with it.
+
+As someone who only seriously started writing Phoenix web applications once Liveview came out, I haven't explored this client library. The existance of it though does make me think that some of the obtuseness of interfacing Liveview with Phoenix Presence comes from the fact that it wasn't originally meant to be interfaced with from within the server. Perhaps the client library is a lot smoother and easier to work with.
+
+** Inherent jankiness of connections
+One thing I noticed occasionally was metas piling up under a given presence id when I reloaded a tab a few times (in Chrome). I'm not sure if this was due to Chrome choosing to keep the old connections around a bit longer, or Phoenix Presence not noticing old connections being replaced with new ones for some reason or another, but eventually the old connections would disappear.
+
+* Conclusions
+I hope this was able to illuminate a little bit of the workings of Phoenix Presence. I look forward to learning more in the future.
