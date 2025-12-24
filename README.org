@@ -1,3 +1,3 @@
 #+title: Readme
 
-This repo holds the actual Hugo site configuration for my blog. It is separated from the content that lives in the =blog_content= repo, and points to this repo to generate the Markdown files using =ox-hugo=.
+Here is contained my Hugo site.
