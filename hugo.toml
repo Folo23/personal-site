@@ -1,6 +1,6 @@
 baseURL = "https://example.org/"
 languageCode = "en-us"
-title = "Frank Blog (temp name)"
+title = "Frank's Thoughts"
 theme = "PaperMod"
 
 [markup.goldmark.renderer]
